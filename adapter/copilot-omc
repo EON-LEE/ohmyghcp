@@ -1,0 +1,17 @@
+#!/bin/sh
+# oh-my-ghcp: starts GitHub Copilot CLI with the oh-my-ghcp plugin loaded and the omc command on PATH.
+# Arguments are passed to copilot unchanged (copilot-omc -p "...", copilot-omc --model gpt-5-mini, ...).
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname -- "$self")/$link ;; esac
+done
+dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P) || exit 1
+if [ ! -f "$dir/../plugin/ghcp-shim.cjs" ]; then
+  echo "oh-my-ghcp: plugin not found at $dir/../plugin; run scripts/install.sh again." >&2
+  exit 1
+fi
+plugin=$(CDPATH= cd -- "$dir/../plugin" && pwd -P) || exit 1
+PATH=$dir:$PATH
+export PATH
+exec copilot --plugin-dir "$plugin" "$@"

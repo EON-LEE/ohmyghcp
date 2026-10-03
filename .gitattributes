@@ -1,0 +1,5 @@
+* text=auto
+*.sh text eol=lf
+adapter/omc text eol=lf
+adapter/copilot-omc text eol=lf
+*.cmd text eol=crlf
