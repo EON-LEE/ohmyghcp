@@ -1,166 +1,189 @@
-# ohmyghcp — Design
+# oh-my-ghcp design
 
-A hook-driven **workflow engine** for GitHub Copilot CLI.
+oh-my-ghcp runs [oh-my-claudecode](https://github.com/Yeachan-Heo/oh-my-claudecode) (OMC) on GitHub Copilot CLI:
+OMC's skills, agents, hooks, MCP state tools and `omc` CLI, unmodified. Everything Copilot-specific lives in a thin
+adapter in this repository.
 
-## 1. Problem statement
+## Goals and non-goals
 
-Copilot CLI ships orchestration **primitives** but no **workflow engine**.
+Goals:
 
-Verified semantics (not assumptions):
+- The same OMC workflows on Copilot CLI as on Claude Code: magic keywords (`ralph:`, `autopilot:`, ...), persistent
+  modes driven by OMC's Stop hook, OMC agents as Copilot subagents, OMC state in `.omc/`.
+- OMC is not forked or patched. The installer clones a pinned upstream release; the adapter adjusts the hook contract
+  and a few names around it.
+- Isolation: nothing is written to `~/.claude`, and Copilot's own configuration is not changed.
 
-| Copilot feature | What it actually is | What it is *not* |
-| --- | --- | --- |
-| `autopilot` mode | A permission/autonomy level: "don't pause for approval between steps". Ends when the agent *decides* it is done. | A multi-phase state machine. No phases, no persisted state, no QA loop, no gates. |
-| `plan` mode | An output style that emits a plan document before acting. | A multi-reviewer consensus planning engine. |
-| `/fleet` | A fan-out parallelism primitive that spawns concurrent subagents. | A phase pipeline with ordering and gates. |
-| `orchestrate` skill | Session-spawning and steering primitives. | A workflow definition with completion predicates. |
+Non-goals:
 
-The gap this project fills: **nothing composes those primitives into a durable, evidence-gated, resumable phase pipeline.**
+- Re-implementing OMC features or fixing OMC bugs here (they belong upstream).
+- Claude-Code-only surfaces: the HUD/statusline and Claude Code's native `/goal`.
+- Copilot in VS Code, which has a different plugin and hook model.
 
-## 2. Why it is buildable
+OMC's author scoped Copilot CLI support as "not OMC core now; a separate experimental Copilot CLI harness first"
+([Yeachan-Heo/oh-my-claudecode#2651](https://github.com/Yeachan-Heo/oh-my-claudecode/issues/2651)). oh-my-ghcp is such
+a separate harness. It is not affiliated with OMC's author or with GitHub.
 
-The decisive primitive exists. From the [Copilot hooks reference](https://docs.github.com/en/copilot/reference/hooks-reference):
+## Why it works at all
 
-> `agentStop` — The main agent finishes a turn. **Output processed: Yes — can block and force continuation.**
-> `decision: "block"` forces another agent turn using `reason` as the prompt.
+Copilot CLI (verified with 1.0.91) loads a Claude-Code-style plugin directory with `--plugin-dir`:
+`.claude-plugin/plugin.json`, `skills/*/SKILL.md`, `agents/*.md`, `hooks/hooks.json` with Claude Code event names and
+`${CLAUDE_PLUGIN_ROOT}`, and `.mcp.json`. OMC's plugin therefore loads almost as is. What differs is the hook contract
+(where hooks run, payload fields, which outputs Copilot honours, event order) and some names. The adapter closes those
+gaps at build time (`build-overlay.cjs`) and at run time (`ghcp-shim.cjs`).
 
-This is mechanically identical to the Claude Code `Stop` hook that powers `oh-my-claudecode`'s convergence loops.
+## Components
 
-Supporting primitives, all verified:
+| Path | Role |
+| --- | --- |
+| `upstream.json` | Pinned OMC release (tag and commit). The installer refuses a tag that resolves to another commit. |
+| `scripts/install.ps1`, `scripts/install.sh` | Clone the pinned OMC, install its runtime dependencies, build the plugin, install the commands. Also update and uninstall. |
+| `adapter/build-overlay.cjs` | Generates the Copilot plugin directory from the OMC checkout. |
+| `adapter/ghcp-shim.cjs` | Hook adapter; every OMC hook runs through it. |
+| `adapter/copilot-omc`, `copilot-omc.cmd` | Launcher: `copilot --plugin-dir <plugin>` with the `bin` directory first on `PATH`. |
+| `adapter/omc`, `omc.cmd` | `omc` command: OMC's CLI with `CLAUDE_CONFIG_DIR` and the session id mapped. |
+| `tests/` | Offline hook replay, real-model end-to-end run, PATH helper test; see [VERIFICATION.md](VERIFICATION.md). |
 
-| Primitive | Event | Used for |
-| --- | --- | --- |
-| Force another turn | `agentStop` → `decision:"block"` + `reason` | Phase advance, retry loop |
-| Block a tool call | `preToolUse` → `permissionDecision:"deny"` | Hard verification gates |
-| Gate a subagent result | `subagentStop` → `block` / `modifiedResponse` | Reviewer consensus |
-| Inject subagent context | `subagentStart` → `additionalContext` | Phase context propagation |
-| Seed a session | `sessionStart` → `additionalContext`, `prompt` | Resume an interrupted flow |
-| Per-agent model routing | `model:` in `*.agent.md` frontmatter | Cost/quality routing |
+Installed layout (`<COPILOT_HOME>` defaults to `~/.copilot`):
 
-## 3. Known platform constraints
+```text
+<COPILOT_HOME>/oh-my-ghcp/
+  omc/      unmodified OMC checkout at the pinned commit, with its runtime npm dependencies
+  plugin/   generated Copilot plugin: copies of OMC's files, generated hooks.json, ghcp-shim.cjs, ghcp-shim.json,
+            oh-my-ghcp.json (build info)
+  bin/      copilot-omc, omc
+  state/    shim bookkeeping (subagent links, host-note markers); entries older than 3 days are pruned
+  claude/   OMC's CLAUDE_CONFIG_DIR, instead of ~/.claude
+  tools/    esbuild, only with -RebuildCli / --rebuild-cli
+```
 
-These are real and shape the design. They are not worked around by wishful thinking.
+Per project, OMC keeps its state in `.omc/`, as on Claude Code.
 
-| Constraint | Impact | Mitigation |
-| --- | --- | --- |
-| **No `postCompact` hook** | Context compaction can silently discard in-context workflow state. | **All workflow state lives in `.omg/state/flow.json`, never only in context.** Every `agentStop` re-injects the full phase instruction via `reason`. |
-| **8 consecutive `block` runaway guard** | The CLI force-ends the turn after 8 straight blocks. | Gate self-limits at 6 (`SELF_LIMIT`) using `stop_hook_active`, then returns `allow` with a resume hint. Long flows use the external runner. |
-| **Shell hooks cannot rewrite prompts** (`modifiedPrompt` is SDK-only) | Cannot transparently inject state into user turns. | Use `agentStop.reason` and `sessionStart.additionalContext` instead. |
-| **No in-process agent SDK** | Cannot drive the agent loop as a library. | External runner drives `copilot -p --autopilot` as a subprocess for multi-phase runs. |
-| **Command `preToolUse` timeouts fail open** | A slow gate cannot reliably block. | Gate must be fast (target < 200 ms) and dependency-free. |
-| **Extensions SDK is experimental** | HUD may break across releases. | HUD is strictly optional and additive; the engine never depends on it. |
-
-## 4. Design principles
-
-1. **Compose, never replace.** The engine drives native primitives. It does not reimplement subagents, permissions, or sessions.
-2. **No name collisions with native features.** Skills are named `flow`, `converge`, `consensus`, `gate` — never `plan` or `autopilot`.
-3. **Fail open, always.** Any gate error, malformed state, or unknown condition returns `allow`. A bug in this plugin must never wedge a user's session.
-4. **Evidence over assertion.** A phase advances only when a declared artifact exists on disk, not because the model claims completion.
-5. **State on disk, not in context.** Survives compaction, resume, and restart.
-6. **Cross-platform parity.** `gate.ps1` and `gate.sh` are behaviourally identical; parity is enforced by tests.
-
-## 5. Architecture
+## Run-time flow
 
 ```mermaid
-flowchart TD
-    A["/omg flow &lt;task&gt;"] --> B["skills/flow/SKILL.md<br/>writes .omg/state/flow.json"]
-    B --> C[Agent works the current phase]
-    C --> D{{"agentStop hook<br/>scripts/gate.ps1 | gate.sh"}}
-    D -->|"evidence missing, attempts left"| E["block — retry instruction"]
-    D -->|"evidence present, phases remain"| F["block — next phase instruction<br/>phaseIndex++"]
-    D -->|"last phase done"| G["allow — complete"]
-    D -->|"self-limit / error / no flow"| H["allow — fail open"]
-    E --> C
-    F --> C
+flowchart LR
+  user(["prompt"]) --> cli["Copilot CLI"]
+  cli -->|"hook event JSON"| shim["ghcp-shim.cjs"]
+  shim -->|"Claude Code payload, cwd = project"| hook["OMC hook script"]
+  hook -->|"Claude Code output"| shim
+  shim -->|"Copilot output"| cli
+  cli -->|"skill, task and MCP tools"| plugin["OMC skills, agents, MCP server"]
+  cli -->|"shell tool"| omc["omc wrapper, OMC CLI"]
+  hook --> state[(".omc/ in the project")]
+  plugin --> state
+  omc --> state
 ```
 
-## 6. State schema — `.omg/state/flow.json`
+Persistent modes work as on Claude Code. OMC's Stop hook blocks the stop with a reason such as
+`[RALPH LOOP - ITERATION 2/100] Work is NOT done...`; Copilot gives the reason to the model as the next prompt, and the
+loop ends when the cancel skill clears the mode state.
 
-```jsonc
-{
-  "version": 1,                       // schema version; unknown → fail open
-  "status": "running",                // running | complete | failed | cancelled
-  "workflow": "default",
-  "phases": ["spec", "build", "verify", "review"],
-  "phaseIndex": 0,
-  "attempts": { "spec": 1 },          // per-phase retry counter
-  "maxAttemptsPerPhase": 3,
-  "consecutiveBlocks": 0,             // reset when the user submits a new prompt
-  "evidence": {                       // completion predicate per phase
-    "spec":   [".omg/artifacts/spec.md"],
-    "build":  [".omg/artifacts/build-ok"],
-    "verify": [".omg/artifacts/verify-ok"],
-    "review": [".omg/artifacts/review-ok"]
-  },
-  "task": "…original user task…",
-  "sessionId": "…",
-  "updatedAt": "2026-08-24T00:00:00Z",
-  "history": [{ "phase": "spec", "outcome": "advanced", "at": "…" }]
-}
-```
+## Build time: what the overlay changes
 
-Evidence entries are repo-relative paths. A phase is satisfied when **every** listed path exists and is non-empty.
+`build-overlay.cjs` copies OMC's plugin files into `plugin/` (OMC's `node_modules` is linked, not copied) and changes
+only the following:
 
-## 7. Gate contract
+- `hooks/hooks.json`: every OMC hook command is routed through the shim with a fully quoted path. On Windows, Copilot
+  runs hook commands through PowerShell, which splits OMC's `"${CLAUDE_PLUGIN_ROOT}"/scripts/...` quoting. Timeouts
+  are tripled (at least 10 s) because Copilot's timeout includes its own process spawn (1 to 4 s on Windows) and drops
+  the output of late hooks. Two host-note hooks go first, for SessionStart and UserPromptSubmit.
+- SessionStart hooks with a matcher other than `*` (OMC's `init` and `maintenance` setup hooks) are dropped. Copilot
+  ignores SessionStart matchers, so they would run on every session.
+- `agents/*.md`: Claude model aliases (`model: opus|sonnet|haiku`), which Copilot rejects, are removed so agents run on
+  the session model, or replaced with `--agent-model`.
+- Skill, agent and command docs: `mcp__plugin_oh-my-claudecode_t__<tool>` becomes `t-<tool>`, and `ToolSearch`
+  becomes a conditional `tool_search_tool` (Copilot usually lists the tools directly).
+- `.mcp.json`: the MCP server gets `"cwd": "."`, which Copilot resolves against the session directory, so OMC's MCP
+  state tools anchor `.omc/` in the project as on Claude Code instead of falling back to `~/.omc`.
+- `ghcp-shim.json`: the subagent model policy (`--task-model` or `--task-model-map`).
+- Optional `--rebuild-cli`: rebuilds OMC's CLI bundle from source. Only OMC v5.6.0 needs it (its bundle lacked
+  `omc ralph`, fixed in v5.6.1).
 
-**Input** — `agentStop` payload on stdin:
+The builder works in a staging directory and fails on any OMC hook command shape it does not know, so an OMC upgrade
+that changes the hook layout cannot silently produce a broken plugin.
 
-```typescript
-{ sessionId: string; timestamp: number; cwd: string; stop_hook_active?: boolean }
-```
+## Run time: hook-contract gaps and how the shim closes them
 
-**Output** — exactly one JSON object on stdout:
+Observed on Copilot CLI 1.0.91 with OMC 5.6.1.
 
-```typescript
-{ decision: "block", reason: string } | { decision: "allow" }
-```
+| Copilot CLI behaviour (compared with Claude Code) | What the shim does |
+| --- | --- |
+| Hooks start in the plugin root, not in the project | Runs the OMC hook with the payload's project directory as `cwd` |
+| The skill tool is `skill`, with a bare skill name (`ralph`) | Passes `Skill` and `oh-my-claudecode:ralph` to OMC for OMC's own skills |
+| The task tool takes `agent_type` | Adds `subagent_type` for OMC |
+| Only top-level `additionalContext` is injected | Lifts `hookSpecificOutput.additionalContext` to the top level |
+| For UserPromptSubmit only the last hook's context reaches the model | Each shim carries the turn's earlier hook contexts forward |
+| OMC text names Claude invocations (`/oh-my-claudecode:<skill>`, `Skill(skill="oh-my-claudecode:<skill>")`, `Agent(subagent_type=...)`) in contexts, Stop reasons and deny reasons; Copilot shows them verbatim and the model copies them into calls that fail | Rewrites them to `call the skill tool with skill "<skill>"` and `the task tool (agent_type=...)` |
+| The task tool's `model` selects a real Copilot model, while OMC passes Claude tiers (`opus`, `sonnet`, `haiku`) | Drops tier aliases (the subagent runs on the session model), or pins or maps them per `ghcp-shim.json` or `GHCP_TASK_MODEL`, through `updatedInput` |
+| OMC writes Claude config under `CLAUDE_CONFIG_DIR` (default `~/.claude`) | Sets `CLAUDE_CONFIG_DIR` to `<COPILOT_HOME>/oh-my-ghcp/claude` unless you set it |
+| PermissionRequest payloads have no `hook_event_name` | Fills it in from `--event` |
+| Subagents get their own `session_id`, fire UserPromptSubmit and Stop, and never fire SubagentStart | Links a subagent to its parent through the spawn prompt, skips its UserPromptSubmit/Stop/SessionEnd hooks, reports its tool hooks under the parent session and synthesizes SubagentStart |
+| A blocking Stop reason comes back as a new prompt and fires UserPromptSubmit again | Skips OMC's UserPromptSubmit hooks for that continuation prompt |
+| With `-p`, SessionEnd fires right after a blocking Stop although the session continues | Skips that SessionEnd; otherwise OMC's cleanup would end the running loop |
+| OMC's ultragoal guard waits for Claude Code's native `/goal` | Sets `ALLOW_ULTRAGOAL_WITHOUT_GOAL=1`, OMC's documented bypass |
+| The model's shell has no `OMC_SESSION_ID` | The host note states the session id; the `omc` wrapper maps `COPILOT_AGENT_SESSION_ID` to `OMC_SESSION_ID` |
+| Models take the `omc ...` steps in OMC skills (for example `omc ralph verify`) for a missing tool and skip them | The host note says `omc` is a shell command, with its absolute path when `bin` is not first on `PATH` |
 
-Stdout discipline is a hard requirement: the CLI concatenates every non-progress line and runs a single `JSON.parse`. Emitting two objects produces invalid JSON and the hook is ignored. Progress lines must be single-line `{"type":"progress","message":"…"}`.
+The host note is one block of context per main session, added on whichever of SessionStart and UserPromptSubmit fires
+first (with 1.0.91 the first prompt's UserPromptSubmit ran before SessionStart, in `-p` and interactive sessions
+alike). It maps Claude names to Copilot ones (MCP tools, ToolSearch, the cancel path, the missing `/goal`), states the
+OMC session id, explains the `omc` command and keeps mode-control skills in the main agent. Subagents get a one-line
+note with the parent session id instead.
 
-### Decision rules
+## Subagent model policy
 
-| ID | Condition | Decision |
-| --- | --- | --- |
-| **R1** | `.omg/state/flow.json` absent | `allow` — not in a workflow, do not interfere |
-| **R2** | Evidence missing, `attempts < maxAttemptsPerPhase` | `block` — retry instruction naming the missing artifacts; `attempts++` |
-| **R3** | Evidence missing, `attempts >= maxAttemptsPerPhase` | `allow` — set `status:"failed"`, escalate to human |
-| **R4** | Evidence present, later phases remain | `block` — next-phase instruction; `phaseIndex++`, reset that phase's attempts |
-| **R5** | Evidence present, final phase | `allow` — set `status:"complete"` |
-| **R6** | `stop_hook_active` and `consecutiveBlocks >= 6` | `allow` — self-limit below the 8-block guard, persist resume hint |
-| **R7** | Malformed / unreadable / unknown-version state | `allow` — fail open, warn on stderr only |
-| **R8** | `status` is `complete`, `failed`, or `cancelled` | `allow` |
+By default, Claude tier hints are dropped and subagents run on the session model (`copilot --model ...`). To choose
+otherwise:
 
-Rule precedence: **R7 → R1 → R8 → R6 → (R2 | R3 | R4 | R5)**. Failure and termination checks run before progress logic.
+- `GHCP_TASK_MODEL=<model>` in the environment (`off` disables), or the installer's `-TaskModel` / `--task-model`:
+  pin every subagent.
+- `-TaskModelMap` / `--task-model-map opus=...,sonnet=...,haiku=...`: map OMC's tiers to Copilot models.
+- `-AgentModel` / `--agent-model`: write one model into every OMC agent definition.
 
-### `preToolUse` gate
+An explicit model in a task call that is not a bare tier alias is kept. Models do pick one: in the end-to-end run a
+gpt-5-mini session asked for `gpt-5.4` for OMC's architect (described as "Opus" in its agent definition). Each subagent
+is billed for its own model, and persistent modes (ralph, autopilot, ultragoal) run several turns from one prompt, so
+pin the model when cost matters.
 
-| ID | Condition | Decision |
-| --- | --- | --- |
-| **P1** | Not in a workflow | `{}` — fall through to normal permissions |
-| **P2** | `status:"running"` and tool would push/publish before the final phase | `deny` with reason |
-| **P3** | Otherwise | `{}` |
+## State and configuration decisions
 
-## 8. Components
+- `CLAUDE_CONFIG_DIR` points to `<COPILOT_HOME>/oh-my-ghcp/claude`, so OMC's session stats, caches and config do not
+  touch Claude Code's `~/.claude`. A value you set yourself is respected.
+- `OMC_HOME` is not set, so OMC's global directory (`~/.omc`, or XDG directories on Linux) is shared with OMC on
+  Claude Code. Redirecting it would not separate them: OMC 5.6.1's session-end worker passes its child processes an
+  allowlist of environment variables without `OMC_HOME`, so it would still write `~/.omc/state`. You can set
+  `OMC_HOME` yourself with that caveat.
+- Project state stays in `.omc/` in the project. Add it to `.gitignore` unless your team commits it.
 
-```
-ohmyghcp/
-├── plugin.json                  # manifest
-├── hooks/hooks.json             # agentStop, preToolUse, subagentStart, subagentStop
-├── scripts/
-│   ├── gate.ps1                 # Windows state machine
-│   ├── gate.sh                  # POSIX state machine
-│   └── lib/                     # shared pure logic, unit-testable
-├── skills/{flow,converge,consensus,gate}/SKILL.md
-├── agents/*.agent.md            # planner, architect, critic, executor, verifier
-├── extensions/omg-hud/extension.mjs   # optional Canvas HUD
-└── docs/{DESIGN.md,TEST-PLAN.md,ATTRIBUTION.md}
-```
+## Plugin loading
 
-## 9. Attribution
+With 1.0.91, `copilot plugin install` does not take a local directory, and the plugin is generated per machine (it
+links to the local OMC checkout). The `copilot-omc` launcher therefore passes `--plugin-dir` on each start and puts
+`bin` first on `PATH`, so a globally installed `omc` from OMC's npm package cannot shadow the wrapper. Plain `copilot`
+sessions are unaffected.
 
-Skill and agent prompt content derives from MIT-licensed upstreams:
+## Upgrading OMC
 
-- `oh-my-claudecode` — Copyright (c) 2025 Yeachan Heo
-- `oh-my-githubcopilot` — Copyright (c) 2026 jmstar85
+1. Set `tag` and `commit` in `upstream.json`.
+2. Run the installer with `-Force` / `--force`.
+3. Run `node tests/selftest-shim.cjs` and `tests/e2e-ralph.ps1`.
+4. Commit only when both pass. The builder rejects unknown hook command shapes, the selftest's A/B checks (raw OMC
+   compared with OMC through the shim) show new Claude-only behaviour, and its keyword checks show changed triggers;
+   keep the README's keyword table and those checks in sync.
 
-The workflow engine (`scripts/`, `hooks/`, `extensions/`) is original work. See `ATTRIBUTION.md` for per-file provenance.
+## Known limitations
+
+- Real Copilot CLI runs were verified with Copilot CLI 1.0.91 on Windows (Windows PowerShell 5.1 and PowerShell 7). On
+  Linux (WSL) the installer and the offline hook replay pass; no real Copilot run was made there. The installers warn
+  on older Copilot CLI versions. macOS is untested. Details: [VERIFICATION.md](VERIFICATION.md).
+- End-to-end runs with a real model cover ralph. For the other modes, the offline replay checks only that the README's
+  example prompts start them (OMC's keyword marker, the skill-tool invocation and the mode state OMC creates at that
+  point) and, for ultragoal, the `/goal` guard bypass.
+- `omc team` (tmux workers), the HUD/statusline and VS Code are not covered.
+- Windows: OMC 5.6.1's SessionEnd hook (`session-end.mjs`) usually needs more than the 300 ms that OMC's `run.cjs`
+  allows it in the foreground. It timed out in all six measured runs, through the shim and run directly as on Claude
+  Code, and in five of them before publishing its cleanup job. A mode still active when you exit then keeps its state
+  in `.omc/state/sessions/<session id>/`; end modes with `cancelomc` before exiting. On WSL the hook finished in time
+  and OMC cleared the state after its 30 s grace.
+- Persistent modes run many tool calls unattended. Use `--allow-all` or `--yolo` only in repositories you trust.
