@@ -207,4 +207,4 @@ Write-Host "oh-my-ghcp is ready: oh-my-claudecode $($info.omc.version)$commit fo
 Write-Host "  start Copilot with OMC:  $launcher            (any copilot options work, e.g. --model)"
 Write-Host "  one-shot:                $launcher -p `"ralph: make the failing tests pass`" --allow-all"
 Write-Host "  without the launcher:    copilot --plugin-dir `"$pluginDir`""
-Write-Host '  in the session, start a prompt with ralph: / autopilot: / ralplan: / deep-interview ... ; stop with cancelomc'
+Write-Host '  in the session, use /omc ralph <task> (or /ralph); keyword prompts like ralph: also work; stop with cancelomc'

@@ -153,4 +153,4 @@ esac
 echo "  start Copilot with OMC:  $launcher            (any copilot options work, e.g. --model)"
 echo "  one-shot:                $launcher -p \"ralph: make the failing tests pass\" --allow-all"
 echo "  without the launcher:    copilot --plugin-dir \"$plugin_dir\""
-echo '  in the session, start a prompt with ralph: / autopilot: / ralplan: / deep-interview ... ; stop with cancelomc'
+echo '  in the session, use /omc ralph <task> (or /ralph); keyword prompts like ralph: also work; stop with cancelomc'

@@ -79,6 +79,29 @@ function build(dst) {
     }
     fs.cpSync(from, path.join(dst, d), { recursive: true });
   }
+  const omcSkillDir = path.join(dst, 'skills', 'omc');
+  if (fs.existsSync(omcSkillDir)) throw new Error('OMC already defines a skill named "omc"; refusing to overwrite it');
+  const skillNames = fs.readdirSync(path.join(dst, 'skills'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && fs.existsSync(path.join(dst, 'skills', entry.name, 'SKILL.md')))
+    .map((entry) => entry.name)
+    .sort();
+  fs.mkdirSync(omcSkillDir);
+  fs.writeFileSync(path.join(omcSkillDir, 'SKILL.md'), `---
+name: omc
+description: Route a request to an oh-my-claudecode workflow skill in Copilot CLI.
+argument-hint: "<workflow> <task>"
+---
+
+Use this as the unified oh-my-claudecode (OMC) entry point for GitHub Copilot CLI.
+
+When the user invokes \`/omc <workflow> <task>\`, identify the first workflow name after \`/omc\` from the available OMC skills below. Invoke Copilot's \`skill\` tool with that exact bare skill name (no plugin prefix), then continue the user's task using the selected skill's instructions. Keep the rest of the user's request as the task; do not replace it with a generic summary.
+
+If the user names a workflow that is not listed, explain that it is unavailable and show the available names. If no workflow is named, ask which one they want and give a few common examples such as \`/omc ralph fix the failing tests\`, \`/omc autopilot implement this feature\`, or \`/omc ralplan plan this refactor\`.
+
+Do not invoke Claude Code slash syntax or run the \`omc\` shell command as a substitute for loading the workflow skill.
+
+Available OMC skills: ${skillNames.map((name) => `\`${name}\``).join(', ')}.
+`);
   for (const f of ['.mcp.json', 'package.json', 'LICENSE']) fs.copyFileSync(path.join(src, f), path.join(dst, f));
   // Share OMC's runtime dependencies instead of copying them (ESM ignores NODE_PATH, so they must sit in an ancestor).
   fs.symlinkSync(path.join(src, 'node_modules'), path.join(dst, 'node_modules'), process.platform === 'win32' ? 'junction' : 'dir');
@@ -219,7 +242,7 @@ function build(dst) {
   const text = `${hookCount} hook commands (+2 host-note), dropped ${dropped.length} [${dropped.join('; ')}], ` +
     `${agentCount} agent model aliases ${agentModel ? '-> ' + agentModel : 'dropped'}, ` +
     `task model ${taskModel || (taskModelMap ? 'map ' + JSON.stringify(taskModelMap) : 'not pinned')}, ` +
-    `cli ${rebuildCli ? 'rebuilt' : 'as shipped'}, ${mcpCwdCount} MCP server cwd -> ".", ${toolNameEdits} Claude tool names in docs -> Copilot names`;
+    `cli ${rebuildCli ? 'rebuilt' : 'as shipped'}, /omc router skill added, ${mcpCwdCount} MCP server cwd -> ".", ${toolNameEdits} Claude tool names in docs -> Copilot names`;
   return { version, commit, text, warnings };
 }
 
