@@ -68,13 +68,22 @@ Claude Code의 `~/.claude`는 바꾸지 않습니다.
 ```powershell
 copilot-omc                                                 # OMC가 붙은 Copilot CLI
 copilot-omc --model gpt-5-mini                              # copilot 옵션은 모두 그대로 사용
-copilot-omc -p "ralph: make the failing tests pass" --allow-all
 ```
 
 `copilot-omc`는 `copilot --plugin-dir <플러그인>`을 실행합니다. 평소 쓰는 `copilot`에는 영향이 없습니다. Copilot
 CLI 1.0.91의 `copilot plugin install`은 로컬 디렉터리를 받지 않아서 런처를 씁니다.
 
-프롬프트에 키워드를 넣으면 OMC 모드가 켜집니다.
+Copilot CLI에서 OMC 스킬을 슬래시 명령으로 실행합니다. `/omc`는 생성된 통합 진입 스킬이고, 뒤에 OMC 스킬 이름과
+요청을 적으면 해당 스킬로 전달합니다. CLI의 슬래시 명령은 대소문자를 구분하지 않으므로 `/OMC`도 같습니다.
+
+```text
+/omc ralph 실패하는 테스트 고쳐줘
+/omc autopilot 할 일 관리 CLI 만들어줘
+/omc ralplan 인증 모듈 리팩터링 계획 세워줘
+```
+
+`/ralph`, `/autopilot`처럼 각 OMC 스킬을 직접 선택해도 됩니다. `ralph:` 같은 키워드를 프롬프트에 넣어 모드를
+시작하는 방식도 계속 지원합니다.
 
 | 모드 | 프롬프트 예 |
 | --- | --- |
@@ -148,8 +157,9 @@ It is unofficial and not affiliated with OMC's author or GitHub.
 
 - Install: `scripts\install.ps1` (Windows) or `sh scripts/install.sh` (Linux, WSL; macOS is untested). Requires
   Node.js 20+, npm and git.
-- Use: start `copilot-omc` (all `copilot` options work), then prompt with `ralph: ...`, `autopilot: ...`,
-  `ralplan: ...`, `deep interview: ...` or `use ultragoal to ...`. `cancelomc` stops a running mode.
+- Use: start `copilot-omc` (all `copilot` options work), then invoke `/omc ralph <task>` (or a direct skill such as
+  `/ralph`) in the interactive session. Keyword prompts such as `ralph: ...`, `autopilot: ...`, `ralplan: ...`,
+  `deep interview: ...` and `use ultragoal to ...` also work. `cancelomc` stops a running mode.
 - Subagents run on the session model unless the task call names a Copilot model (in our test a gpt-5-mini session
   asked for `gpt-5.4`); OMC's Claude tiers are dropped. Set `GHCP_TASK_MODEL` or the installer's task-model options to
   pin them. Persistent modes run several turns per prompt; try a light model such as `gpt-5-mini` first, for the

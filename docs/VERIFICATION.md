@@ -17,7 +17,7 @@ gaps the adapter closes: [DESIGN.md](DESIGN.md).
 
 | Test | What it covers | Model calls | Run on |
 | --- | --- | --- | --- |
-| [`tests/selftest-shim.cjs`](../tests/selftest-shim.cjs) | Builds a test plugin from an OMC checkout and replays Copilot CLI 1.0.91-shaped hook events through the shim: the generated `hooks.json`, the host note, every example prompt in the README's keyword table, skill and task tool mapping, the subagent model policy and lifecycle, the `omc` wrapper, the ultragoal `/goal` guard, Stop → SessionEnd → continuation, and that OMC leaves the real `~/.claude` and `~/.omc` untouched (other changes in `~/.claude`, for example from a Claude Code session running at the same time, are reported, not counted). Where the shim changes behaviour, an A/B check runs the same input through unmodified OMC. | None | Windows, Linux |
+| [`tests/selftest-shim.cjs`](../tests/selftest-shim.cjs) | Builds a test plugin from an OMC checkout and replays Copilot CLI 1.0.91-shaped hook events through the shim: generated `/omc` router skill and its OMC skill names, `hooks.json`, the host note, every example prompt in the README's keyword table, skill and task tool mapping, the subagent model policy and lifecycle, the `omc` wrapper, the ultragoal `/goal` guard, Stop → SessionEnd → continuation, and that OMC leaves the real `~/.claude` and `~/.omc` untouched (other changes in `~/.claude`, for example from a Claude Code session running at the same time, are reported, not counted). Where the shim changes behaviour, an A/B check runs the same input through unmodified OMC. This verifies the generated skill file, not live slash-command selection by Copilot. | None | Windows, Linux |
 | [`tests/e2e-ralph.ps1`](../tests/e2e-ralph.ps1) and [`tests/e2e-check.cjs`](../tests/e2e-check.cjs) | A real `copilot -p "ralph: ..."` run on a small repository with a failing test ([`tests/fixtures/ralph-sandbox`](../tests/fixtures/ralph-sandbox)), with its own `COPILOT_HOME`. The checker reads Copilot's session events and the shim log. | Yes, `gpt-5-mini` by default (about 4 to 10 AIC per run) | Windows |
 | [`tests/user-path.test.ps1`](../tests/user-path.test.ps1) | The installer's user `PATH` helper, against a throwaway registry key. | None | Windows |
 | Installers | Fresh install, re-run, `-Force`, uninstall, each in a temporary `COPILOT_HOME`. | None | Windows, Linux |
@@ -172,5 +172,6 @@ shim translates the reason).
 - `omc team` (tmux workers), the HUD/statusline, and Copilot in VS Code.
 - Copilot CLI versions other than 1.0.91. The installers warn when the installed version is older.
 - OMC's slash forms such as `/ultrawork`: Copilot CLI parses a leading `/` itself.
+- The generated `/omc` router has not been exercised as a live interactive slash command; the offline selftest checks its generated skill definition.
 - Claude Code itself. Comparisons with Claude Code come from OMC's code and from running unmodified OMC hooks directly
   (the A/B checks).

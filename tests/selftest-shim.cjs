@@ -244,6 +244,11 @@ try {
   check('cancel skill makes tool_search_tool conditional (Copilot lists non-deferred tools directly)',
     cancelDoc.includes('`tool_search_tool` (only if they are missing from your tool list'),
     (cancelDoc.match(/[^\n]*`tool_search_tool`[^\n]*/g) || []).join(' | '));
+  const omcSkill = fs.readFileSync(path.join(plugin, 'skills', 'omc', 'SKILL.md'), 'utf8');
+  check('/omc router skill is generated with workflow routing and real OMC skill names',
+    /^name: omc$/m.test(omcSkill) && omcSkill.includes('skill` tool with that exact bare skill name') &&
+      ['`ralph`', '`autopilot`', '`ralplan`'].every((name) => omcSkill.includes(name)),
+    (omcSkill.match(/Available OMC skills:[^\n]*/) || [''])[0]);
 
   section('main session start (-p order: UserPromptSubmit before SessionStart)');
   // Installed layout: the omc wrapper next to the plugin (<root>/bin), which the host note names.
