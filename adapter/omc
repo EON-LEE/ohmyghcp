@@ -1,0 +1,19 @@
+#!/bin/sh
+# oh-my-ghcp: runs the OMC CLI of the oh-my-ghcp plugin (installed at <this dir>/../plugin) with Copilot-side state dirs.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case $link in /*) self=$link ;; *) self=$(dirname -- "$self")/$link ;; esac
+done
+dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P) || exit 1
+home=${COPILOT_HOME:-$HOME/.copilot}
+: "${CLAUDE_CONFIG_DIR:=$home/oh-my-ghcp/claude}"
+export CLAUDE_CONFIG_DIR
+state=$home/oh-my-ghcp/state
+# Map the Copilot session id only when the shim saw it as a main session (subagent shells carry a different id).
+if [ -z "${OMC_SESSION_ID:-}" ] && [ -n "${COPILOT_AGENT_SESSION_ID:-}" ] &&
+  [ -f "$state/note/$COPILOT_AGENT_SESSION_ID.json" ] && [ ! -f "$state/alias/$COPILOT_AGENT_SESSION_ID.json" ]; then
+  OMC_SESSION_ID=$COPILOT_AGENT_SESSION_ID
+  export OMC_SESSION_ID
+fi
+exec node "$dir/../plugin/bin/oh-my-claudecode.js" "$@"
