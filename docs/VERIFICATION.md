@@ -17,7 +17,7 @@ gaps the adapter closes: [DESIGN.md](DESIGN.md).
 
 | Test | What it covers | Model calls | Run on |
 | --- | --- | --- | --- |
-| [`tests/selftest-shim.cjs`](../tests/selftest-shim.cjs) | Builds a test plugin from an OMC checkout and replays Copilot CLI 1.0.91-shaped hook events through the shim: the generated `hooks.json`, the host note, every example prompt in the README's keyword table, skill and task tool mapping, the subagent model policy and lifecycle, the `omc` wrapper, the ultragoal `/goal` guard, Stop → SessionEnd → continuation, and that the real `~/.claude` and `~/.omc` stay untouched. Where the shim changes behaviour, an A/B check runs the same input through unmodified OMC. | None | Windows, Linux |
+| [`tests/selftest-shim.cjs`](../tests/selftest-shim.cjs) | Builds a test plugin from an OMC checkout and replays Copilot CLI 1.0.91-shaped hook events through the shim: the generated `hooks.json`, the host note, every example prompt in the README's keyword table, skill and task tool mapping, the subagent model policy and lifecycle, the `omc` wrapper, the ultragoal `/goal` guard, Stop → SessionEnd → continuation, and that OMC leaves the real `~/.claude` and `~/.omc` untouched (other changes in `~/.claude`, for example from a Claude Code session running at the same time, are reported, not counted). Where the shim changes behaviour, an A/B check runs the same input through unmodified OMC. | None | Windows, Linux |
 | [`tests/e2e-ralph.ps1`](../tests/e2e-ralph.ps1) and [`tests/e2e-check.cjs`](../tests/e2e-check.cjs) | A real `copilot -p "ralph: ..."` run on a small repository with a failing test ([`tests/fixtures/ralph-sandbox`](../tests/fixtures/ralph-sandbox)), with its own `COPILOT_HOME`. The checker reads Copilot's session events and the shim log. | Yes, `gpt-5-mini` by default (about 4 to 10 AIC per run) | Windows |
 | [`tests/user-path.test.ps1`](../tests/user-path.test.ps1) | The installer's user `PATH` helper, against a throwaway registry key. | None | Windows |
 | Installers | Fresh install, re-run, `-Force`, uninstall, each in a temporary `COPILOT_HOME`. | None | Windows, Linux |
@@ -81,7 +81,7 @@ before these runs: an empty result came back as `$null` instead of an empty arra
   every tool without Claude Code's `/goal`.
 - Hook cost on Windows, Node start included: 0.15 to 1.1 s per hook, 3.4 s for OMC's `session-start.mjs`. Each prompt
   runs three UserPromptSubmit hooks, about 1.9 s in total.
-- The selftest runs OMC's SessionEnd with OMC's test settings (`NODE_ENV=test`, a 5 s foreground budget and a 0.5 s
+- The selftest runs OMC's SessionEnd with OMC's test settings (`NODE_ENV=test`, a 20 s foreground budget and a 0.5 s
   grace period), so its INFO lines show the cleanup working on Windows too. The next section shows the shipped
   behaviour.
 

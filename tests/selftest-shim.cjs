@@ -44,14 +44,36 @@ fs.writeFileSync(path.join(proj, 'README.md'), 'selftest\n');
 
 const home = os.homedir();
 // The real home must stay untouched: Claude Code's config dir (OMC must use CLAUDE_CONFIG_DIR under COPILOT_HOME) and
-// OMC's own global dir (hook children get a fake home below). Existence + mtime of these paths must not change.
-const HOME_PROBES = ['.claude', '.omc', '.claude/.session-stats.json', '.claude/.omc', '.claude/hooks', '.claude/hud',
+// OMC's own global dir (hook children get a fake home below). Must not change: whether ~/.claude exists, and existence +
+// mtime of the probes below and of each top-level entry OMC wrote to its config dirs during the test. Other changes
+// in ~/.claude, for example from a Claude Code session running at the same time (projects, sessions), are reported.
+const HOME_PROBES = ['.omc', '.claude/.session-stats.json', '.claude/.omc', '.claude/hooks', '.claude/hud',
   '.claude/settings.json', '.claude/CLAUDE.md'];
-const homeState = () => Object.fromEntries(HOME_PROBES.map((p) => {
-  try { return [p, fs.statSync(path.join(home, p)).mtimeMs]; } catch { return [p, null]; }
-}));
-const homeDiff = (a, b) => HOME_PROBES.filter((p) => a[p] !== b[p]).map((p) => `${p}: ${a[p]} -> ${b[p]}`);
+const omcConfigDir = path.join(cph, 'oh-my-ghcp', 'claude');
+const rawConfigDir = path.join(cph, 'raw-claude');
+const mtimeOf = (p) => { try { return fs.statSync(path.join(home, p)).mtimeMs; } catch { return null; } };
+const homeState = () => {
+  const s = Object.fromEntries(HOME_PROBES.map((p) => [p, mtimeOf(p)]));
+  s['.claude'] = fs.existsSync(path.join(home, '.claude')) ? 'exists' : null;
+  let top = [];
+  try { top = fs.readdirSync(path.join(home, '.claude')); } catch {}
+  for (const n of top) s[`.claude/${n}`] = mtimeOf(`.claude/${n}`);
+  return s;
+};
 const homeBefore = homeState();
+const homeCheck = (name, now) => {
+  const omcPaths = new Set(['.claude', ...HOME_PROBES]);
+  for (const dir of [omcConfigDir, rawConfigDir]) if (fs.existsSync(dir)) for (const n of fs.readdirSync(dir)) omcPaths.add(`.claude/${n}`);
+  const prev = (p) => homeBefore[p] ?? null;
+  const cur = (p) => now[p] ?? null;
+  const changed = [...new Set([...Object.keys(homeBefore), ...Object.keys(now), ...omcPaths])].filter((p) => prev(p) !== cur(p));
+  const leaked = changed.filter((p) => omcPaths.has(p));
+  check(name, leaked.length === 0, leaked.length
+    ? `${leaked.map((p) => `${p}: ${prev(p)} -> ${cur(p)}`).join('; ')} (OMC on Claude Code writes these too; re-run when it is idle)`
+    : `watched: ${[...omcPaths].join(', ')}`);
+  const other = changed.filter((p) => !omcPaths.has(p));
+  if (other.length) info('real ~/.claude changed outside OMC paths (another Claude Code session?), not counted', other.join(', '));
+};
 // OMC keeps global config and state in ~/.omc (OMC_HOME; XDG dirs on Linux), shared with OMC on Claude Code. Its
 // detached session-end workers keep only allowlisted variables (HOME and USERPROFILE, not OMC_HOME or XDG_*), so a
 // fake home is what keeps every OMC process of this test away from the real one.
@@ -81,8 +103,10 @@ const RAW = 'cccccccc-0000-4000-8000-00000000000c';
 const ALT = 'dddddddd-0000-4000-8000-00000000000d';
 const HOST_NOTE = 'runs inside GitHub Copilot CLI, not Claude Code';
 // run.cjs gives SessionEnd a 300ms foreground budget and the OMC worker waits a 30s producer grace before it
-// clears mode state; widen the first and shorten the second (both honored only under NODE_ENV=test).
-const FAST_SESSION_END = { NODE_ENV: 'test', OMC_SESSION_END_TEST_FOREGROUND_TIMEOUT_MS: '5000', OMC_SESSION_END_TEST_PRODUCER_GRACE_MS: '500' };
+// clears mode state; widen the first and shorten the second (both honored only under NODE_ENV=test). The budget is
+// wide (under the manifest's 30s) because these checks test what OMC does, not how fast: on a busy Windows machine
+// session-end.mjs can take over 5s and run.cjs then ends it before it publishes its cleanup job.
+const FAST_SESSION_END = { NODE_ENV: 'test', OMC_SESSION_END_TEST_FOREGROUND_TIMEOUT_MS: '20000', OMC_SESSION_END_TEST_PRODUCER_GRACE_MS: '500' };
 
 const results = [];
 const check = (name, ok, detail) => {
@@ -163,13 +187,15 @@ function fire(event, payload = {}, { sid = MAIN, envExtra = {}, eventName = even
 // Claude Code-style direct run of an unmodified OMC hook (A/B baseline): project cwd, no shim.
 function rawOmc(script, payload, sid, envExtra = {}) {
   const input = JSON.stringify({ session_id: sid, cwd: proj, ...payload });
+  const t0 = Date.now();
   const r = spawnSync(process.execPath, [path.join(plugin, 'scripts', 'run.cjs'), path.join(plugin, 'scripts', script)], {
-    cwd: proj, env: { ...env, CLAUDE_CONFIG_DIR: path.join(cph, 'raw-claude'), ...envExtra }, input, encoding: 'utf8', timeout: 60000, windowsHide: true,
+    cwd: proj, env: { ...env, CLAUDE_CONFIG_DIR: rawConfigDir, ...envExtra }, input, encoding: 'utf8', timeout: 60000, windowsHide: true,
   });
+  const ms = Date.now() - t0;
   let out = null;
   try { out = JSON.parse((r.stdout || '').trim() || 'null'); } catch {}
   const hso = (out && out.hookSpecificOutput) || {};
-  return { code: r.status, out, deny: hso.permissionDecision === 'deny' ? hso : null };
+  return { code: r.status, ms, stderr: (r.stderr || '').trim(), out, deny: hso.permissionDecision === 'deny' ? hso : null };
 }
 
 let origShimCfg = null;
@@ -434,7 +460,7 @@ try {
     const job = readJson(jobFile(sid)) || {};
     return w.ok ? `OMC worker cleared ralph-state after ${w.ms}ms`
       : `ralph-state still present after ${w.ms}ms; job owner=${job.owner ? 'claimed' : 'none'} ` +
-        `foreground-cleanup=${((job.actions || {})['foreground-cleanup'] || {}).status} (OMC worker never claimed the job)`;
+        `foreground-cleanup=${((job.actions || {})['foreground-cleanup'] || {}).status}${job.owner ? '' : ' (OMC worker has not claimed the job)'}`;
   };
   check('SessionEnd right after the block: skipped, no OMC cleanup job, ralph-state kept',
     r.log.length === 2 && r.log.every((x) => x.skip === 'session-continues-after-stop-block') && !fs.existsSync(jobFile(MAIN)) &&
@@ -445,8 +471,9 @@ try {
   if ('session_id' in rawRalph) rawRalph.session_id = RAW;
   fs.mkdirSync(path.dirname(stateFile(RAW, 'ralph-state.json')), { recursive: true });
   fs.writeFileSync(stateFile(RAW, 'ralph-state.json'), JSON.stringify(rawRalph, null, 2));
-  rawOmc('session-end.mjs', { hook_event_name: 'SessionEnd', reason: 'complete' }, RAW, FAST_SESSION_END);
-  check('A/B raw OMC: that SessionEnd schedules cleanup of the live ralph-state (loop would die)', cleanupScheduled(RAW));
+  const rawEnd = rawOmc('session-end.mjs', { hook_event_name: 'SessionEnd', reason: 'complete' }, RAW, FAST_SESSION_END);
+  check('A/B raw OMC: that SessionEnd schedules cleanup of the live ralph-state (loop would die)', cleanupScheduled(RAW),
+    `session-end.mjs exit ${rawEnd.code} after ${rawEnd.ms}ms${rawEnd.stderr ? `: ${rawEnd.stderr}` : ''}`);
   info('A/B raw OMC worker', workerOutcome(RAW));
   r = fire('UserPromptSubmit', { prompt: reason });
   check('continuation prompt: OMC UPS hooks skipped (Claude Code fires none), no second host note',
@@ -503,10 +530,8 @@ try {
   section('isolation');
   const ran = readLog().filter((x) => !x.skip);
   check('every hook child ran in the project dir', ran.length > 0 && ran.every((x) => x.cwd === proj), JSON.stringify([...new Set(ran.map((x) => x.cwd))]));
-  const after = homeState();
-  check('real ~/.claude and ~/.omc unchanged', homeDiff(homeBefore, after).length === 0, homeDiff(homeBefore, after).join('; '));
-  const cfgDir = path.join(cph, 'oh-my-ghcp', 'claude');
-  const cfgFiles = fs.existsSync(cfgDir) ? fs.readdirSync(cfgDir, { recursive: true }).map(String) : [];
+  homeCheck('OMC paths in the real ~/.claude and ~/.omc unchanged', homeState());
+  const cfgFiles = fs.existsSync(omcConfigDir) ? fs.readdirSync(omcConfigDir, { recursive: true }).map(String) : [];
   check('CLAUDE_CONFIG_DIR writes land under COPILOT_HOME', cfgFiles.includes('.session-stats.json'), cfgFiles.slice(0, 6).join(', ') || '(not created)');
 
   section('per-hook wall time, ms (node start included)');
@@ -519,8 +544,7 @@ try {
     const lw = waitFor(() => liveWorkers() === 0, 60000);
     info('OMC session-end workers', lw.ok ? `all exited ${lw.ms}ms after the last hook` : `still running after ${lw.ms}ms`);
   }
-  const late = homeState();
-  check('real ~/.claude and ~/.omc still unchanged after session-end workers', homeDiff(homeBefore, late).length === 0, homeDiff(homeBefore, late).join('; '));
+  homeCheck('OMC paths in the real ~/.claude and ~/.omc still unchanged after session-end workers', homeState());
   check('nothing written to the (fake) home ~/.claude by any OMC process', !fs.existsSync(path.join(fakeHome, '.claude')),
     fs.existsSync(path.join(fakeHome, '.claude')) ? fs.readdirSync(path.join(fakeHome, '.claude'), { recursive: true }).map(String).slice(0, 6).join(', ') : '');
   const fakeOmc = path.join(fakeHome, '.omc');
